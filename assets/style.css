@@ -19,3 +19,8 @@
 #battery-card[data-level="low"] .battery-track span{background:#fa7979}
 @media(min-width:821px){.metrics{grid-template-columns:repeat(5,minmax(0,1fr))}}
 @media(min-width:621px) and (max-width:820px){.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
+
+.battery-mini{font-size:12px;white-space:nowrap;color:#8ce2cc}
+.battery-mini[data-level="unknown"]{color:#9cafc3}
+.battery-mini[data-level="medium"]{color:#f1ca86}
+.battery-mini[data-level="low"]{color:#fa7979}
