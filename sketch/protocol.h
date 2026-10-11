@@ -61,6 +61,13 @@ struct __attribute__((packed)) RawPacket {
   uint16_t pos[15];
   uint16_t zero[15];
 };
+// Independent, slow battery telemetry; do not change the 240-byte state ABI.
+struct __attribute__((packed)) BatteryPacket {
+  char magic[4];  // DQB1
+  uint16_t millivolts;
+  uint8_t percent; // 0..100 if flags & 1
+  uint8_t flags;   // bit 0: valid voltage
+};
 struct __attribute__((packed)) ServoReplyPacket {
   char magic[4];
   uint8_t op, targetId, ok, reserved;
@@ -73,3 +80,4 @@ static_assert(sizeof(CalPacket) == 38, "Cal ABI");
 static_assert(sizeof(ServoPacket) == 12, "Servo ABI");
 static_assert(sizeof(RawPacket) == 66, "Raw ABI");
 static_assert(sizeof(ServoReplyPacket) == 12, "Servo reply ABI");
+static_assert(sizeof(BatteryPacket) == 8, "Battery ABI");
