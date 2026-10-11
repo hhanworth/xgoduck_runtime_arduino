@@ -94,19 +94,20 @@ class BluetoothWorker:
         return parse_info(self.ctl('info', mac, timeout=5))
 
     def devices(self):
+        # BlueZ exposes property-filtered device lists. Query them in bulk to
+        # avoid N sequential D-Bus CLI calls when a scan sees many devices.
         found = parse_devices(self.ctl('devices', timeout=5))
         found.update(self.scan_cache)
         if self.saved_address and self.saved_address not in found:
             found[self.saved_address] = 'Saved Xbox controller'
-        result = []
-        for mac, name in list(found.items())[:35]:
-            try:
-                state = self.info(mac)
-            except RuntimeError:
-                state = dict(paired=False, connected=False)
-            result.append(dict(address=mac, name=name, paired=state['paired'],
-                               connected=state['connected']))
-        return result
+        paired = set(parse_devices(self.ctl('devices', 'Paired', timeout=5)))
+        connected = set(parse_devices(self.ctl('devices', 'Connected', timeout=5)))
+        ordered = sorted(found.items(), key=lambda item: (
+            item[0] != self.saved_address,
+            not any(x in item[1].lower() for x in ('xbox', 'controller', 'gamepad')),
+            item[1].lower()))
+        return [dict(address=mac, name=name, paired=mac in paired,
+                     connected=mac in connected) for mac, name in ordered[:40]]
 
     def status(self):
         devices = self.devices()
