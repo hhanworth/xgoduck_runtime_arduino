@@ -268,7 +268,21 @@ def main(argv=None):
     from xbox_bluetooth import BluetoothWorker
     import threading
     bt_worker = BluetoothWorker(args.api)
-    bt_thread = threading.Thread(target=bt_worker.run, args=(lambda: alive[0],),
+
+    def bluetooth_supervisor():
+        # A fatal BlueZ/programming exception must not leave systemd showing
+        # "active" while its only Bluetooth management thread has vanished.
+        # The normal HTTP connection-reset path is handled inside run().
+        while alive[0]:
+            try:
+                bt_worker.run(lambda: alive[0])
+            except Exception as exc:
+                print(f'Bluetooth worker unexpectedly stopped: {exc!r}; '
+                      'restarting', file=sys.stderr, flush=True)
+            if alive[0]:
+                time.sleep(2.0)
+
+    bt_thread = threading.Thread(target=bluetooth_supervisor,
                                  name='xgoduck-bluetooth', daemon=True)
     bt_thread.start()
     missing_logged = False
