@@ -2,7 +2,7 @@ name: Native Xbox input tests
 
 on:
   push:
-    branches: [feature/xbox-linux-input]
+    branches: [feature/xbox-linux-input, feature/xgoduck-combined]
   pull_request:
     branches: [master]
 
@@ -23,5 +23,12 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check Python syntax
         run: python -m py_compile python/controller.py python/main.py python/bluetooth_relay.py tools/xbox_host.py tools/xbox_bluetooth.py
-      - name: Check browser Bluetooth JavaScript syntax
-        run: node --check assets/bluetooth.js
+      - name: Check browser JavaScript syntax
+        run: |
+          node --check assets/bluetooth.js
+          node --check assets/app.js
+          node --check assets/gamepad.js
+          node --check assets/calibrate.js
+          node --check assets/servo.js
+      - name: Test browser Xbox Gamepad decoder
+        run: node --test tests/gamepad.test.cjs

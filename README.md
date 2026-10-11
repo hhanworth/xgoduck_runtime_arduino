@@ -93,7 +93,7 @@ If an isolated CLI build tries to re-download a toolchain that is already on the
 
 GCC 14 can tail-call `k_thread_name_set` at the end of `setup()` with a Thumb `JUMP24` from the loadable sketch into flash. The Uno Q loader then returns ENOEXEC (−8) and the MCU never starts. The `asm volatile("nop")` at the end of `setup()` keeps a long call. `python3 tools/verify-elf.py` checks the built ELF for the same class of short branch to an unresolved firmware symbol.
 
-The web UI is served on port 9527. App Lab starts the same app under the name in `app.yaml`.
+The web UI is served on port 9527. It includes both the browser Xbox Gamepad API and the Uno Q host's Bluetooth management panel; these are separate control paths. Native host Xbox ownership has priority over browser input. App Lab starts the same app under the name in `app.yaml`.
 
 The app boots in **inference only**: the network runs, torque stays off. From the control page:
 
@@ -106,9 +106,28 @@ The app boots in **inference only**: the network runs, torque stays off. From th
 | Roulade | While upright in walk, runs `xgoduck_roulade.onnx` for 1.9 s, then returns to walk. |
 | Torque off | Disables position control. |
 
-Closing the page, or leaving it in the background for more than 1 second, turns position control off. Calibration and servo setup use a 2 second heartbeat and then exit and turn torque off.
+For browser/keyboard/gamepad control, closing the page or leaving it in the background turns position control off. An independently claimed Uno Q host Xbox lease continues operating without a browser; the Web Torque off button always revokes that lease. Calibration and servo setup use a 2 second heartbeat and then exit and turn torque off.
 
 Walk commands are vx ±0.4, vy ±0.3, ωz ±1.0, with a joystick dead zone of 0.1. Head channels are four radians in ±1. Keyboard: W/S, A/D, Q/E, Space.
+
+## Xbox gamepad control (browser)
+
+Connect a standard-layout Xbox controller over USB or Bluetooth to the computer/phone running the XGO Duck control page. Open the control page, press a gamepad button so the browser discovers it, release both sticks and click **Enable gamepad**. Browser Gamepad API support is required; for remote hosts some browsers require HTTPS (or localhost). The Xbox pad is not paired directly to the Uno Q in this mode. No extra Python packages or firmware modifications are required.
+
+| Input | Action |
+| --- | --- |
+| Left stick | Forward/backward (vx ±0.4), strafe (vy ±0.3) |
+| Right stick X | Yaw (ωz ±1.0) |
+| Hold LB | Replace walking input with head channels 1–4 (left X/Y, right X/Y) |
+| RT | Mouth 0–30° |
+| A | Default pose |
+| Start | Walk / get-up |
+| X | Pick (upright walk only) |
+| Y | Roulade (upright walk only) |
+| B | Emergency torque off |
+
+The gamepad is **opt-in** and never arms automatically on connection. Deadzone 0.12 uses rescaling outside the deadzone. Face buttons are edge-triggered. Disconnecting the gamepad, backgrounding the page, or blurring the browser window disables control and sends torque-off. Host/MCU watchdogs still apply. Before testing with the robot powered, validate mappings and button directions with torque off, then test with the robot supported safely.
+
 
 ## Direct USB/Bluetooth Xbox controller (no browser)
 
@@ -341,6 +360,49 @@ Action smoothing uses α = 0.45 on slices `[0:5]`, `[5:10]`, and `[10:14]`. `pre
 
 Position control stops if commands are absent for 250 ms or the IMU is absent for 100 ms. Enabling again takes an explicit mode change. Host feedback older than 150 ms also disarms; that matches the MCU source-age limit.
 
+## Battery estimate (servo rail)
+
+The STM32 polls **one responding STS/SCS servo per second** on the existing 1 Mbps serial bus.
+The requested register is `0x3E` (present voltage, **0.1 V/count**); the chosen servo rotates
+among IDs reporting position feedback. A separate 1.5 ms bounded reply wait runs **after**
+the 100 Hz position read, so it does not overlap with the regular sync-read traffic.
+No extra fuel gauge, ADC wiring, or Linux GPIO is needed.
+
+As on [Microduck](https://github.com/pollen-robotics/microduck/blob/main/duck-control/src/model.rs),
+the voltage-to-charge estimate is linear: **6.6 V = 0%** and **8.2 V = 100%**,
+clamped at the endpoints. These are usable voltages for an unregulated **2S Li-ion
+servo rail under load**, *not* a cell-accurate state of charge. The initial successful
+sample is used immediately; later valid samples are smoothed with an EMA
+(alpha = 0.25 per approximately 1 s reading) to reduce load-related jumps.
+A missing reply or a nonsensical reading (outside 4.0–14.0 V) is ignored.
+After **5 seconds without a valid reply**, the MCU clears the estimate to *unknown*.
+A 5 V bench supply, by contrast, is valid and displays 0% under this mapping.
+Adjust the thresholds in `sketch/battery.h` if your servo power rail differs.
+
+**Local indicators (continue working without Linux):**
+
+- Uno Q **8×13 blue LED matrix** shows a battery outline with up to 8 fill columns.
+  No valid reading shows a question mark. At ≤10% the fill blinks.
+- Uno Q **STM RGB LED 4** (active-low `LED4_R/G/B`) shows green ≥60%,
+  yellow from 25–59%, red below 25%, flashing red at ≤10%.
+  No valid measurement flashes blue. The QRB-controlled LEDs are left untouched.
+
+Every 100 MCU state reports (~1 s), `duck_battery` carries a separate
+**8-byte `DQB1` packet** (little endian: 4-byte magic, uint16 millivolts,
+uint8 percentage, uint8 flags, bit 0 = valid).
+The 240-byte `duck_state` ABI and the 100 Hz motion controller are unchanged.
+The host exposes `battery.valid`, `battery.voltage_v`, and `battery.percent`
+in `/api/status` and the **control Web UI** shows voltage, percentage and a level
+bar. The Calibration and Servo setup pages also show a compact battery readout. The host treats packets older than 3 seconds as unknown; it never displays
+unavailable telemetry as 0%.
+
+For a protocol-only check run `python3 -m unittest discover -s tests -v`.
+**Hardware verification is still required** on an Uno Q with the actual battery
+and servos: check the register returns usable voltage, indicator orientation,
+bus-loop overruns, color thresholds, and timeout-to-unknown behavior with
+servo power disconnected. No such physical test is implied by these changes.
+
+
 ## Layout
 
 ```text
@@ -365,3 +427,9 @@ python tools/measure.py --seconds 60
 - [Microduck](https://github.com/pollen-robotics/microduck)
 - [Arduino RouterBridge](https://github.com/arduino-libraries/Arduino_RouterBridge)
 - [Arduino Router](https://github.com/arduino/arduino-router)
+
+## Combined branch and verification
+
+The `feature/xgoduck-combined` branch combines the two Xbox frontends and the servo-voltage battery indicator. The host gamepad's exclusive lease remains authoritative: a browser gamepad will release its local input **without sending torque-off** if a native lease becomes active, so a webpage cannot hijack or unexpectedly stop the host pad. The Web **Torque off** button remains an explicit global emergency stop. No pairing or automatic reconnect arms the robot.
+
+Browser Gamepad API tests: `node --test tests/gamepad.test.cjs`. Python tests: `python3 -m unittest discover -s tests -p 'test_*.py' -v`. The STM32 firmware and actual Bluetooth, voltage and LED operation still require physical hardware validation.

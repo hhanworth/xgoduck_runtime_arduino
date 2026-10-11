@@ -80,6 +80,8 @@ class Controller:
         self.last_action = [0.0]*15
         self.started = time.monotonic()
         self.boot_pd = {}
+        self.battery = None
+        self.battery_rx_time = 0.0
         self.raw_pos = list(FACTORY_ZERO)
         self.zero_pos = list(FACTORY_ZERO)
         self.cal_done = [False]*15
@@ -113,6 +115,15 @@ class Controller:
     def _push_zeros(self):
         self.bridge.notify('duck_cal', encode_cal(CAL_SET_ZEROS, mask=ALL_MASK, raw=self.zero_pos))
         self._zeros_pushed = True
+
+    def receive_battery(self, raw):
+        try:
+            reading = decode_battery(raw)
+        except ValueError:
+            return
+        with self.lock:
+            self.battery = reading
+            self.battery_rx_time = time.monotonic()
 
     def receive_boot_pd(self, raw):
         if not isinstance(raw, (bytes, bytearray)) or len(raw)!=32: return
@@ -710,6 +721,10 @@ class Controller:
                 raw_pos=list(self.raw_pos), zero_pos=list(self.zero_pos),
                 factory_zero_pos=list(FACTORY_ZERO), cal_done=list(self.cal_done),
                 cal_targets=list(self.cal_targets), raw_mask=self.raw_mask)
+            # MCU reports battery separately; never publish stale voltage as valid.
+            battery_fresh = self.battery is not None and now - self.battery_rx_time < 3.0
+            result['battery'] = (dict(self.battery) if battery_fresh else
+                                 {'valid': False, 'voltage_v': None, 'percent': None})
             result['control_ready']=bool(fb and fb.imu_ok and now-self.rx_time<.15 and self.mode not in EXCLUSIVE_MODES)
             result['deployment'] = dict(reference='rl/raspi_deploy', control_hz=50,
                 home_deg=HOME_DEG.tolist(), default_deg=DEFAULT_DEG,

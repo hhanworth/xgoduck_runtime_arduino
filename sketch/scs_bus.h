@@ -11,6 +11,10 @@ static uint8_t servoParserFlag = 0;
 static uint8_t servoRxBuffer[32];
 static uint8_t servoRxLen = 0;
 static uint8_t servoRxDataLen = 0;
+// Slow register read uses the same UART/parser but must not perturb servoRxMask.
+static uint8_t servoVoltageTarget = 0;
+static uint8_t servoVoltageRaw = 0;
+static bool servoVoltageReady = false;
 
 static int motorIndexById(uint8_t id) {
   for (uint8_t i = 0; i < NUM_MOTORS; i++) {
@@ -171,6 +175,13 @@ static void readAllRegisters(uint8_t address, uint8_t length) {
 
 static void readAllState() { readAllRegisters(ADDR_PRESENT, PRESENT_LEN); }
 
+static void readSingleVoltage(uint8_t id) {
+  servoVoltageTarget = id;
+  servoVoltageReady = false;
+  const uint8_t data[2] = {ADDR_PRESENT_VOLTAGE, 1};
+  scsWriteBuf(id, 0x02, data, 2);
+}
+
 static void readSinglePresent(uint8_t id) {
   const uint8_t data[2] = {ADDR_PRESENT, PRESENT_LEN};
   scsWriteBuf(id, 0x02, data, 2);
@@ -228,7 +239,7 @@ static void parseServoRx() {
         break;
       case 3:
         servoRxBuffer[3] = res;
-        if (res == 0x04 || res == 0x08 || res == 0x09 || res == 0x0B) {
+        if (res == 0x03 || res == 0x04 || res == 0x08 || res == 0x09 || res == 0x0B) {
           servoParserFlag = 4;
           servoRxLen = 0;
           servoRxDataLen = res;
@@ -256,6 +267,12 @@ static void parseServoRx() {
           uint8_t sid = servoRxBuffer[2];
           uint8_t dataLen = servoRxDataLen;
           const int idx = motorIndexById(sid);
+          if (dataLen == 3 && sid == servoVoltageTarget &&
+              servoRxBuffer[4] == 0) {
+            servoVoltageRaw = servoRxBuffer[5];
+            servoVoltageReady = true;
+            break;
+          }
           if (dataLen == 4 && servoRxBuffer[4] == 0 && idx >= 0) {
             servoBootP[idx]=servoRxBuffer[5]; servoBootD[idx]=servoRxBuffer[6];
             servoPdMask |= 1u << idx;
