@@ -138,6 +138,52 @@ class BluetoothWorkerTests(unittest.TestCase):
         self.assertIsNone(self.worker.saved_address)
         self.assertFalse(self.path.exists())
 
+    def test_http_connection_reset_keeps_worker_running(self):
+        # Reproduces Errno 104 when Arduino App restarts mid-request.
+        calls = {'next': 0, 'report': 0}
+        def http(method, path, data=None):
+            if path == 'next':
+                calls['next'] += 1
+                if calls['next'] == 1:
+                    raise ConnectionResetError(104, 'Connection reset by peer')
+                return {'job': None}
+            if path == 'report':
+                calls['report'] += 1
+                return {'ok': True}
+            self.fail('unexpected endpoint')
+
+        with patch.object(self.worker, '_http', side_effect=http), \
+             patch('xbox_bluetooth.time.sleep', return_value=None):
+            self.worker.run(lambda: calls['next'] < 3)
+        self.assertEqual(calls['next'], 3)
+        self.assertGreaterEqual(calls['report'], 1)
+
+    def test_connection_reset_while_reporting_retries_same_job(self):
+        # Pair/scan should NOT execute twice after a lost completion response.
+        calls = {'next': 0, 'report': 0}
+        reports = []
+        def http(method, path, data=None):
+            if path == 'next':
+                calls['next'] += 1
+                return {'job': {'id': 42, 'action': 'scan', 'address': None}} \
+                    if calls['next'] == 1 else {'job': None}
+            if path == 'report':
+                calls['report'] += 1
+                reports.append(data)
+                if calls['report'] == 1:
+                    raise ConnectionResetError(104, 'Connection reset by peer')
+                return {'ok': True}
+            self.fail('unexpected endpoint')
+
+        with patch.object(self.worker, '_http', side_effect=http), \
+             patch.object(self.worker, 'scan', return_value='scan complete') as scan, \
+             patch('xbox_bluetooth.time.sleep', return_value=None):
+            self.worker.run(lambda: calls['report'] < 2)
+        scan.assert_called_once_with()
+        self.assertEqual(calls['report'], 2)
+        self.assertEqual(reports[0]['job_id'], 42)
+        self.assertEqual(reports[1]['job_id'], 42)
+
     def test_systemd_state_directory(self):
         with patch.dict(os.environ, {'STATE_DIRECTORY': self.tmp.name}):
             worker = BluetoothWorker('http://localhost', runner=self.blue)
