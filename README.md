@@ -134,6 +134,48 @@ Action smoothing uses α = 0.45 on slices `[0:5]`, `[5:10]`, and `[10:14]`. `pre
 
 Position control stops if commands are absent for 250 ms or the IMU is absent for 100 ms. Enabling again takes an explicit mode change. Host feedback older than 150 ms also disarms; that matches the MCU source-age limit.
 
+## Battery estimate (servo rail)
+
+The STM32 polls **one responding STS/SCS servo per second** on the existing 1 Mbps serial bus.
+The requested register is `0x3E` (present voltage, **0.1 V/count**); the chosen servo rotates
+among IDs reporting position feedback. A separate 1.5 ms bounded reply wait runs **after**
+the 100 Hz position read, so it does not overlap with the regular sync-read traffic.
+No extra fuel gauge, ADC wiring, or Linux GPIO is needed.
+
+As on [Microduck](https://github.com/pollen-robotics/microduck/blob/main/duck-control/src/model.rs),
+the voltage-to-charge estimate is linear: **6.6 V = 0%** and **8.2 V = 100%**,
+clamped at the endpoints. These are usable voltages for an unregulated **2S Li-ion
+servo rail under load**, *not* a cell-accurate state of charge. The initial successful
+sample is used immediately; later valid samples are smoothed with an EMA
+(alpha = 0.25 per approximately 1 s reading) to reduce load-related jumps.
+A missing reply or a nonsensical reading (outside 4.0–14.0 V) is ignored.
+After **5 seconds without a valid reply**, the MCU clears the estimate to *unknown*.
+A 5 V bench supply, by contrast, is valid and displays 0% under this mapping.
+Adjust the thresholds in `sketch/battery.h` if your servo power rail differs.
+
+**Local indicators (continue working without Linux):**
+
+- Uno Q **8×13 blue LED matrix** shows a battery outline with up to 8 fill columns.
+  No valid reading shows a question mark. At ≤10% the fill blinks.
+- Uno Q **STM RGB LED 4** (active-low `LED4_R/G/B`) shows green ≥60%,
+  yellow from 25–59%, red below 25%, flashing red at ≤10%.
+  No valid measurement flashes blue. The QRB-controlled LEDs are left untouched.
+
+Every 100 MCU state reports (~1 s), `duck_battery` carries a separate
+**8-byte `DQB1` packet** (little endian: 4-byte magic, uint16 millivolts,
+uint8 percentage, uint8 flags, bit 0 = valid).
+The 240-byte `duck_state` ABI and the 100 Hz motion controller are unchanged.
+The host exposes `battery.valid`, `battery.voltage_v`, and `battery.percent`
+in `/api/status` and the **control Web UI** shows voltage, percentage and a level
+bar. The Calibration and Servo setup pages also show a compact battery readout. The host treats packets older than 3 seconds as unknown; it never displays
+unavailable telemetry as 0%.
+
+For a protocol-only check run `python3 -m unittest discover -s tests -v`.
+**Hardware verification is still required** on an Uno Q with the actual battery
+and servos: check the register returns usable voltage, indicator orientation,
+bus-loop overruns, color thresholds, and timeout-to-unknown behavior with
+servo power disconnected. No such physical test is implied by these changes.
+
 ## Layout
 
 ```text

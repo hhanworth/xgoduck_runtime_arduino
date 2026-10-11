@@ -9,6 +9,7 @@ CAL = struct.Struct('<4sBBH15H')
 SERVO = struct.Struct('<4sBBBBBBH')
 RAW = struct.Struct('<4sH15H15H')
 SERVO_REPLY = struct.Struct('<4sBBBBHH')
+BATTERY = struct.Struct('<4sHBB')  # millivolts, percentage, valid flag
 ALL_MASK = 0x7fff  # hardware order: 10..14,20..24,30..34
 DISARM, ARM, POLICY, HOLD = range(4)
 
@@ -21,6 +22,7 @@ assert CAL.size == 38
 assert SERVO.size == 12
 assert RAW.size == 66
 assert SERVO_REPLY.size == 12
+assert BATTERY.size == 8
 
 @dataclass(frozen=True)
 class Feedback:
@@ -115,6 +117,22 @@ def decode_servo_reply(data):
     if x[0] != b'DQS2':
         raise ValueError('invalid servo reply ABI')
     return {'op': x[1], 'target_id': x[2], 'ok': bool(x[3]), 'raw_pos': x[5], 'zero_pos': x[6]}
+
+def decode_battery(data):
+    """Slow servo supply-voltage telemetry; an invalid sample is UNKNOWN, not 0%."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) != BATTERY.size:
+        raise ValueError('expected 8-byte battery packet')
+    magic, mv, pct, flags = BATTERY.unpack(data)
+    if magic != b'DQB1' or flags & ~1 or pct > 100:
+        raise ValueError('invalid battery packet')
+    if not (flags & 1):
+        if mv or pct:
+            raise ValueError('invalid unknown battery reading')
+        return {'valid': False, 'voltage_v': None, 'percent': None}
+    if not 4000 <= mv <= 14000:
+        raise ValueError('out-of-range servo voltage')
+    return {'valid': True, 'voltage_v': mv / 1000, 'percent': pct}
+
 
 def elapsed_us(now, before):
     return (now-before) & 0xffffffff
