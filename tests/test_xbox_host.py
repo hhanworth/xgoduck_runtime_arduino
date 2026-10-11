@@ -2,17 +2,32 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from xbox_host import (PadState, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED,
                        ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_RZ,
                        BTN_SELECT, BTN_START, BTN_SOUTH, BTN_EAST, BTN_WEST,
-                       BTN_NORTH, BTN_TL, ARM_CHORD_S)
+                       BTN_NORTH, BTN_TL, ARM_CHORD_S, usable)
 
 RANGES = {code: (0, 255, 127.5) for code in (ABS_X, ABS_Y, ABS_RX, ABS_RY)}
 RANGES[ABS_RZ] = (0, 1023, 0)
 
 
 class XboxMappingTests(unittest.TestCase):
+    def test_linux_evdev_axis_capabilities_with_absinfo(self):
+        # Actual python-evdev defaults to (axis_code, AbsInfo) tuples.
+        # The gamepad probe must explicitly request integer codes.
+        class InputDevice:
+            def capabilities(self, absinfo=True):
+                axes = list((ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_RZ))
+                return {
+                    EV_ABS: [(axis, object()) for axis in axes] if absinfo else axes,
+                    EV_KEY: [BTN_SELECT, BTN_START, BTN_SOUTH, BTN_EAST,
+                             BTN_WEST, BTN_NORTH],
+                }
+        ecodes = SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY)
+        self.assertTrue(usable(InputDevice(), SimpleNamespace(ecodes=ecodes)))
+
     def test_neutral_deadzone_and_scaled_directions(self):
         pad = PadState(RANGES)
         self.assertTrue(pad.neutral())
