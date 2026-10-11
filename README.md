@@ -110,6 +110,109 @@ Closing the page, or leaving it in the background for more than 1 second, turns 
 
 Walk commands are vx ±0.4, vy ±0.3, ωz ±1.0, with a joystick dead zone of 0.1. Head channels are four radians in ±1. Keyboard: W/S, A/D, Q/E, Space.
 
+## Direct USB/Bluetooth Xbox controller (no browser)
+
+This mode runs the Xbox reader **on the Uno Q Debian Linux host**, not in
+the Arduino App Lab container. App Lab runs Python in Docker; by default it
+cannot be assumed to see host `/dev/input/event*` devices. The host helper
+uses `python-evdev` for the kernel input event API and sends its commands
+through **localhost HTTP** to the running App. No new sketch protocol or
+ONNX dependencies are required.
+
+```text
+Xbox USB / Bluetooth → UNO Q host /dev/input/eventN
+  → tools/xbox_host.py (20 Hz, edge-triggered buttons)
+  → localhost:9527/api/gamepad/{claim,input,release}
+  → python/controller.py (exclusive lease + 350 ms watchdog)
+  → 50 Hz ONNX inference → Arduino Bridge → STM32 100 Hz → motors
+```
+
+### Setup on the UNO Q Debian host
+
+1. Start the existing Duck App as in **Running** above. The MCU, ONNX
+   models and web UI remain part of the app. You do **not** have to open
+   the webpage after starting the App.
+2. Pair the Xbox controller with the **UNO Q**, not with your laptop:
+   - **USB:** use a USB-C OTG host adapter or powered USB-C hub. Confirm
+     `lsusb` detects the controller. Host mode may depend on the OS image
+     and USB-C power/host setup; see the official
+     [UNO Q user manual](https://docs.arduino.cc/tutorials/uno-q/user-manual/).
+   - **Bluetooth:** on the UNO Q host, run `bluetoothctl`; then
+     `power on`, `agent on`, `default-agent`, `scan on`. Put the
+     controller in pairing mode and run `pair MAC`, `trust MAC`,
+     `connect MAC`. Some older Xbox One controllers lack Bluetooth.
+3. Install evdev on the **Linux host** (not in `python/requirements.txt`):
+   ```bash
+   sudo apt update
+   sudo apt install python3-evdev
+   python3 tools/xbox_host.py --list
+   ```
+   If `--list` shows permission denied for `/dev/input/event*`, run
+   `ls -l /dev/input/event*` and grant the service account access
+   to the appropriate input device group. On default Debian installs
+   this is often `input`:
+   `sudo usermod -aG input "$USER"` then **log out and back in**.
+   Membership of the `input` group gives broad raw input access;
+   on shared devices prefer a narrowly scoped udev rule instead.
+4. Verify the App is reachable **from the UNO Q host**:
+   ```bash
+   curl -f http://127.0.0.1:9527/api/status
+   python3 tools/xbox_host.py
+   ```
+   If a nonstandard controller name is not auto-detected, pass
+   `--device /dev/input/eventN` for the correct event node shown by
+   `--list`. Device nodes may change after reboot; automatic device
+   discovery is preferable. Run the reader with a terminal multiplexer
+   or as a systemd service to make it persistent. An optional sample unit
+   is in `tools/xgoduck-xbox.service.example`; edit its absolute path
+   and service user before installing.
+
+### Xbox buttons and safety
+
+| Input | Action |
+| --- | --- |
+| **Back + Start held 1 second** | Claim input lease **with torque still off**; must release and re-hold after disconnect/stop |
+| **A** | Default pose (arm only when fresh MCU + IMU) |
+| **Start** | Walk / recovery policy (arm only when fresh MCU + IMU) |
+| Left stick Y / X | Forward and strafe (vx ±0.4, vy ±0.3) |
+| Right stick X | Yaw (ωz ±1.0) |
+| Hold LB + left/right sticks | Head channels 1–4 (±1), walking twist zero |
+| RT | Mouth 0–30° |
+| X / Y | Pick / roulade, subject to existing recovery interlocks |
+| **B** | **Immediate torque off; lease revoked** |
+
+Before claiming, **release Back/Start once**, then hold the chord with the
+sticks at neutral; controller rearm is never automatic. Once claimed, the
+physical pad has exclusive motion ownership. Web motion commands and mode
+changes are rejected; **web Torque off always overrides the pad**.
+Browser backgrounding does not disable an active native Xbox session.
+
+The Linux reader sends 20 Hz heartbeats even with neutral sticks.
+Disconnect, input synchronization loss, daemon termination, or network
+errors end the session. The host controller revokes a session if input
+is absent for **350 ms**; the existing MCU command watchdog is still
+**250 ms** (with independent source-age and IMU checks). A stale MCU/IMU
+feedback condition also revokes the lease. Following a stop, the hand-held
+controller must perform the Back + Start chord again.
+
+**Initial bring-up:** keep the robot safely supported with its feet clear
+of the floor. First run `--list`, verify key/axis mapping with motors
+disarmed, then enable default pose before testing walk. Never rely solely
+on the B button: keep a power disconnect accessible. App HTTP endpoints
+are not authenticated for remote networks; use the existing control page
+and host API only on a trusted, firewalled network.
+
+### Tests
+
+From a normal development machine (Python 3.11+ and NumPy):
+
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+These unit tests use synthetic Linux input events and a fake Bridge. They
+do not require a physical gamepad, evdev, ONNX files, or a running motor.
+
 ## Policies
 
 Models in `python/`:
