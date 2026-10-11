@@ -238,6 +238,39 @@ behind an authenticated reverse proxy. The background service does
 not start robot movement on connection, and a browser cannot override
 an active native gamepad control lease except with Torque off.
 
+### Linux Xbox input layouts and diagnostics
+
+Microsoft's Xbox Bluetooth HID driver can expose a different axis map from
+the USB `xpad` driver. `tools/xbox_host.py` now auto-detects both:
+
+| Linux input layout | Left stick | Right stick | Right trigger |
+| --- | --- | --- | --- |
+| `xpad` (common USB) | `ABS_X/ABS_Y` | `ABS_RX/ABS_RY` | `ABS_RZ` |
+| `bluetooth-hid` | `ABS_X/ABS_Y` | `ABS_Z/ABS_RZ` | `ABS_GAS` |
+
+For the hand-held Xbox device that shows `vendor=045e usable=False`:
+
+```bash
+cd ~/ArduinoApps/xgoduck_runtime_arduino_
+git pull --ff-only origin feature/xbox-linux-input
+sudo systemctl restart xgoduck-xbox.service
+python3 tools/xbox_host.py --list
+```
+
+A correctly matched device now shows `usable=True layout=bluetooth-hid`
+or `usable=True layout=xpad`. The `--list` command also prints axis
+names and missing safety-critical buttons to assist with unsupported
+kernel mappings. The reader does not guess between short-range
+trigger axes and full-range sticks; an ambiguous mapping stays
+`usable=False` until diagnosed. This command is read-only and can run
+while the service is active.
+
+Confirm that the reader reports an input device in
+`journalctl -u xgoduck-xbox.service -n 30 --no-pager`. Then release
+Back/Start and hold them together for one second with centered sticks.
+Claiming the input lease never activates servo torque by itself.
+Keep the robot supported and test A/default pose before Start/walk.
+
 ### Xbox buttons and safety
 
 | Input | Action |
