@@ -110,6 +110,24 @@ Closing the page, or leaving it in the background for more than 1 second, turns 
 
 Walk commands are vx ±0.4, vy ±0.3, ωz ±1.0, with a joystick dead zone of 0.1. Head channels are four radians in ±1. Keyboard: W/S, A/D, Q/E, Space.
 
+## Xbox gamepad control (browser)
+
+Connect a standard-layout Xbox controller over USB or Bluetooth to the computer/phone running the XGO Duck control page. Open the control page, press a gamepad button so the browser discovers it, release both sticks and click **Enable gamepad**. Browser Gamepad API support is required; for remote hosts some browsers require HTTPS (or localhost). The Xbox pad is not paired directly to the Uno Q in this mode. No extra Python packages or firmware modifications are required.
+
+| Input | Action |
+| --- | --- |
+| Left stick | Forward/backward (vx ±0.4), strafe (vy ±0.3) |
+| Right stick X | Yaw (ωz ±1.0) |
+| Hold LB | Replace walking input with head channels 1–4 (left X/Y, right X/Y) |
+| RT | Mouth 0–30° |
+| A | Default pose |
+| Start | Walk / get-up |
+| X | Pick (upright walk only) |
+| Y | Roulade (upright walk only) |
+| B | Emergency torque off |
+
+The gamepad is **opt-in** and never arms automatically on connection. Deadzone 0.12 uses rescaling outside the deadzone. Face buttons are edge-triggered. Disconnecting the gamepad, backgrounding the page, or blurring the browser window disables control and sends torque-off. Host/MCU watchdogs still apply. Before testing with the robot powered, validate mappings and button directions with torque off, then test with the robot supported safely.
+
 ## Policies
 
 Models in `python/`:
