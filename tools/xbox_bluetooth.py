@@ -45,7 +45,9 @@ class BluetoothWorker:
         self.api_base = api_base.rstrip('/')
         self.clock = clock
         self.runner = runner or subprocess.run
+        state_dir = os.environ.get('STATE_DIRECTORY')
         self.state_path = Path(state_path) if state_path else (
+            Path(state_dir) / 'xbox_bluetooth.json' if state_dir else
             Path.home() / '.local' / 'state' / 'xgoduck' / 'xbox_bluetooth.json')
         self.saved_address = None
         self.autoconnect = False
