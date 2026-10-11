@@ -31,7 +31,12 @@ class SimBlueZ:
             data += '\n    Trusted: ' + ('yes' if self.trusted else 'no')
             data += '\n    Connected: ' + ('yes' if self.connected else 'no')
         elif op == 'devices':
-            data = 'Device ' + MAC + ' Xbox Wireless Controller'
+            if len(args) > 1 and args[1] == 'Paired' and not self.paired:
+                data = ''
+            elif len(args) > 1 and args[1] == 'Connected' and not self.connected:
+                data = ''
+            else:
+                data = 'Device ' + MAC + ' Xbox Wireless Controller'
         elif op == 'scan':
             data = '[NEW] Device ' + MAC + ' Xbox Wireless Controller'
         else:
