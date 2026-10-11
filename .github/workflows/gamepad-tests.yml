@@ -1,0 +1,25 @@
+name: Native Xbox input tests
+
+on:
+  push:
+    branches: [feature/xbox-linux-input]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  gamepad:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test dependencies
+        run: python -m pip install numpy==2.2.6
+      - name: Run Xbox input and Controller tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Check Python syntax
+        run: python -m py_compile python/controller.py python/main.py tools/xbox_host.py
