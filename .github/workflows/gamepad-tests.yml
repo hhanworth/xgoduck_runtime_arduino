@@ -22,4 +22,6 @@ jobs:
       - name: Run Xbox input and Controller tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Check Python syntax
-        run: python -m py_compile python/controller.py python/main.py tools/xbox_host.py
+        run: python -m py_compile python/controller.py python/main.py python/bluetooth_relay.py tools/xbox_host.py tools/xbox_bluetooth.py
+      - name: Check browser Bluetooth JavaScript syntax
+        run: node --check assets/bluetooth.js
