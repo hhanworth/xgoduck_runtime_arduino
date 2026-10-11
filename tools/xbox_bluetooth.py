@@ -204,8 +204,17 @@ class BluetoothWorker:
             print(f'Bluetooth power on failed: {exc}', flush=True)
         # Try restoring previous pairing even before App Lab has started.
         self.autoconnect_step()
+        # A completed pair/connect task must survive a transient HTTP reset.
+        # Keep the completion until the App acknowledges it, rather than
+        # silently leaving the UI busy after a failed report.
+        pending_report = None
         while running():
             try:
+                if pending_report is not None:
+                    self.report(**pending_report)
+                    pending_report = None
+                    self.last_status = self.clock()
+
                 response = self._http('GET', 'next')
                 job = response.get('job')
                 if job:
@@ -214,11 +223,13 @@ class BluetoothWorker:
                         error_text = ''
                     except (ValueError, RuntimeError, OSError) as exc:
                         result, error_text = '', str(exc)
-                    try:
-                        self.report(**self.status(), job_id=job['id'],
-                                    result=result, error=error_text)
-                    except (error.URLError, TimeoutError, ValueError) as exc:
-                        print(f'Bluetooth result report failed: {exc}', flush=True)
+                    pending_report = {
+                        **self.status(), 'job_id': job['id'],
+                        'result': result, 'error': error_text,
+                    }
+                    self.report(**pending_report)
+                    pending_report = None
+                    self.last_status = self.clock()
                 else:
                     now = self.clock()
                     # Auto-reconnect and status discovery are on host thread only.
@@ -226,10 +237,12 @@ class BluetoothWorker:
                     if not self.last_status or now - self.last_status >= STATUS_PERIOD_S:
                         self.report(**self.status())
                         self.last_status = now
-            except (error.URLError, TimeoutError, ValueError, RuntimeError) as exc:
-                # The Duck App may still be booting. Reconnect the previously
-                # paired controller regardless of its HTTP availability.
+            except (OSError, TimeoutError, ValueError, RuntimeError) as exc:
+                # ConnectionResetError, RemoteDisconnected, BrokenPipeError,
+                # HTTPError and URLError can occur when Arduino App restarts.
+                # OSError catches them all; retry without killing this thread.
+                # Autoconnect remains independent of the App's HTTP availability.
                 self.autoconnect_step()
                 print(f'Bluetooth worker retrying: {exc}', flush=True)
-            # Systemd manages process restarts; worker polls independently of UI.
+            # All BlueZ and HTTP work remains in this background thread.
             time.sleep(1.0)
