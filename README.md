@@ -167,6 +167,77 @@ Xbox USB / Bluetooth → UNO Q host /dev/input/eventN
    is in `tools/xgoduck-xbox.service.example`; edit its absolute path
    and service user before installing.
 
+### Web-managed Bluetooth pairing and boot reconnect
+
+The **Xbox 蓝牙手柄** panel on the normal Duck control webpage now
+manages the **Uno Q Linux host's Bluetooth adapter**, not the Bluetooth
+adapter on the browser's computer/phone. It can:
+
+- **Scan devices** (roughly 12 seconds), showing discovered Bluetooth
+  addresses and names. The operation is queued and runs only on the
+  Linux host's background worker; HTTP and 50 Hz inference continue.
+- **Pair and connect** a selected Xbox controller. On the controller,
+  hold its pairing button until the Xbox indicator flashes rapidly.
+  If the controller was already paired, connect without pairing again.
+- **Disconnect** (pauses automatic reconnect), or **Forget** (removes
+  BlueZ pairing and saved preference).
+- Display connection, pairing, background progress, and service status.
+
+After a successful pairing, the background service saves the MAC
+address and `autoconnect` flag at the path determined by
+`$STATE_DIRECTORY/xbox_bluetooth.json` (systemd's `StateDirectory`
+setting), or `~/.local/state/xgoduck/xbox_bluetooth.json` when
+run manually. BlueZ separately persists Bluetooth bond keys.
+**On the next boot**, when the service starts, it checks that the
+remembered device is still paired and tries to connect it, then
+retries about every 30 seconds when disconnected. A deliberate UI
+disconnect disables these retries until you reconnect manually.
+Automatic Bluetooth reconnection **never** arms motors or claims the
+gamepad lease: you must still release Back/Start and hold the chord
+for one second before requesting default pose or walk.
+
+#### Enable background service at boot
+
+Install BlueZ and evdev on the Uno Q Debian Linux **host**:
+
+```bash
+sudo apt update
+sudo apt install bluez python3-evdev
+sudo systemctl enable --now bluetooth
+bluetoothctl list
+python3 tools/xbox_host.py --list
+```
+
+The existing Arduino App (HTTP port 9527) must also be running for
+web scans and on-screen connection state. The host BlueZ worker can
+attempt reconnect before the App starts. Start the App as documented
+above and use a **separate** host service for Xbox input + Bluetooth.
+
+A sample systemd unit is
+`tools/xgoduck-xbox.service.example`. Copy it to
+`/etc/systemd/system/xgoduck-xbox.service`, editing **User**,
+**WorkingDirectory**, and the absolute **ExecStart** path to match the
+actual repository location (the sample paths are placeholders). Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now xgoduck-xbox.service
+sudo systemctl status xgoduck-xbox.service
+journalctl -u xgoduck-xbox.service -f
+```
+
+The sample service uses `StateDirectory=xgoduck`; the saved pairing
+preference lives in systemd's persistent state directory, typically
+`/var/lib/xgoduck/xbox_bluetooth.json`. It grants access to the
+`input` group. Do not simultaneously run another copy of
+`tools/xbox_host.py` against the same gamepad.
+
+**Security:** The existing web API is not authenticated. Bluetooth
+pairing and trust should only be exposed on a trusted network or
+behind an authenticated reverse proxy. The background service does
+not start robot movement on connection, and a browser cannot override
+an active native gamepad control lease except with Torque off.
+
 ### Xbox buttons and safety
 
 | Input | Action |
