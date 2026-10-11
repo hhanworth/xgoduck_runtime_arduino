@@ -76,6 +76,9 @@ setInterval(async()=>{
     const r=await fetch('/api/status');
     if(!r.ok)throw new Error('status read failed');
     const s=await r.json();
+    const b=s.battery;
+    $('battery-mini').textContent=b?.valid?`Battery ${Math.round(b.percent)}% · ${b.voltage_v.toFixed(2)} V`:'Battery unknown';
+    $('battery-mini').dataset.level=!b?.valid?'unknown':b.percent<25?'low':b.percent<60?'medium':'high';
     active=s.mode==='calibrate';
     $('mode').textContent=s.mode+(s.mcu_calibrating?' · MCU':'');
     if(s.last_error)$('message').textContent=s.last_error;
