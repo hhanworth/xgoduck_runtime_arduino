@@ -7,6 +7,7 @@ The 50 Hz ONNX policy and MCU command transport remain in python/controller.py.
 """
 import argparse
 import json
+import os
 import select
 import signal
 import sys
@@ -175,6 +176,11 @@ def serve_device(pad, evdev, api, running):
           'Release both sticks; hold Back + Start for 1 second to claim control.')
     try:
         while running():
+            # On Bluetooth/USB removal some kernels keep the old fd open.
+            # Do not keep sending stale stick values just because select()
+            # returns no more events. A new device must re-arm explicitly.
+            if not os.path.exists(pad.path):
+                raise OSError('gamepad input device disappeared')
             ready, _, _ = select.select([pad.fd], [], [], 0.02)
             if ready:
                 for event in pad.read():
