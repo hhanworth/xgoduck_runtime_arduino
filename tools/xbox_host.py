@@ -18,9 +18,13 @@ from urllib import error, request
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
 SYN_DROPPED = 3
 ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ = range(6)
+ABS_GAS, ABS_BRAKE = 9, 10
+AXIS_NAMES = {ABS_X: 'ABS_X', ABS_Y: 'ABS_Y', ABS_Z: 'ABS_Z',
+              ABS_RX: 'ABS_RX', ABS_RY: 'ABS_RY', ABS_RZ: 'ABS_RZ',
+              ABS_GAS: 'ABS_GAS', ABS_BRAKE: 'ABS_BRAKE'}
 BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST = 304, 305, 307, 308
 BTN_TL, BTN_TR2, BTN_SELECT, BTN_START = 310, 313, 314, 315
-REQUIRED_ABS = {ABS_X, ABS_Y, ABS_RX, ABS_RY}
+REQUIRED_ABS = {ABS_X, ABS_Y, ABS_RX, ABS_RY}  # Conventional USB layout.
 REQUIRED_KEYS = {BTN_SOUTH, BTN_EAST, BTN_WEST, BTN_NORTH, BTN_START}
 BUTTON_ACTIONS = {BTN_EAST: 'off', BTN_SOUTH: 'hold', BTN_START: 'policy',
                   BTN_WEST: 'pick', BTN_NORTH: 'roulade'}
@@ -39,8 +43,14 @@ def deadzone(value):
 class PadState:
     """Pure event mapper, suitable for tests without hardware or root privileges."""
 
-    def __init__(self, ranges, initial_keys=()):
+    def __init__(self, ranges, initial_keys=(), right_x=ABS_RX,
+                 right_y=ABS_RY, right_trigger=ABS_RZ):
         # ranges: {abs_code: (min, max, initial_value)}
+        # Xbox HID Bluetooth can put the right stick on ABS_Z/ABS_RZ
+        # and the triggers on ABS_BRAKE/ABS_GAS instead of RX/RY.
+        self.right_x = right_x
+        self.right_y = right_y
+        self.right_trigger = right_trigger
         self.ranges = dict(ranges)
         self.axes = {code: initial for code, (_lo, _hi, initial) in ranges.items()}
         self.keys = set(initial_keys)
@@ -81,7 +91,8 @@ class PadState:
         return 1.0 if BTN_TR2 in self.keys else 0.0
 
     def neutral(self):
-        return all(self.stick(code) == 0 for code in REQUIRED_ABS)
+        return all(self.stick(code) == 0 for code in
+                   (ABS_X, ABS_Y, self.right_x, self.right_y))
 
     def arm_ready(self, now):
         both = BTN_SELECT in self.keys and BTN_START in self.keys
@@ -111,12 +122,12 @@ class PadState:
 
     def command(self):
         lx, ly = self.stick(ABS_X), self.stick(ABS_Y)
-        rx, ry = self.stick(ABS_RX), self.stick(ABS_RY)
+        rx, ry = self.stick(self.right_x), self.stick(self.right_y)
         shift = BTN_TL in self.keys
         return {
             'twist': [0.0, 0.0, 0.0] if shift else [-ly * 0.4, -lx * 0.3, -rx],
             'head': [lx, -ly, rx, -ry] if shift else [0.0] * 4,
-            'mouth': round(self.trigger(ABS_RZ) * 30),
+            'mouth': round(self.trigger(self.right_trigger) * 30),
         }
 
 
@@ -132,13 +143,79 @@ class API:
             return json.load(reply)
 
 
-def usable(device, evdev):
-    # python-evdev's default absinfo=True returns (code, AbsInfo) pairs
-    # for EV_ABS, which cannot be compared to plain integer axis codes.
+def controller_layout(device, evdev):
+    """Resolve two Linux Xbox layouts; never interpret a trigger as a stick.
+
+    The USB/xpad layout: X/Y + RX/RY sticks and Z/RZ triggers.
+    The Bluetooth HID layout: X/Y + Z/RZ sticks and BRAKE/GAS triggers.
+    Auto-detection is restricted to a recognised four-axis gamepad with
+    safety-critical Back, Start, A, B, X and Y buttons present.
+    """
     caps = device.capabilities(absinfo=False)
     axes = set(caps.get(evdev.ecodes.EV_ABS, []))
     keys = set(caps.get(evdev.ecodes.EV_KEY, []))
-    return REQUIRED_ABS <= axes and REQUIRED_KEYS <= keys
+    if not ({ABS_X, ABS_Y} <= axes and REQUIRED_KEYS <= keys and
+            BTN_SELECT in keys):
+        return None
+    usb = {ABS_RX, ABS_RY} <= axes
+    bt = {ABS_Z, ABS_RZ} <= axes
+    if usb and bt:
+        # If both layouts are advertised, distinguish full-range sticks
+        # from short-range triggers using their kernel AbsInfo spans.
+        try:
+            rx = device.absinfo(ABS_RX)
+            ry = device.absinfo(ABS_RY)
+            z = device.absinfo(ABS_Z)
+            rz = device.absinfo(ABS_RZ)
+            usb_span = min(rx.max - rx.min, ry.max - ry.min)
+            bt_span = min(z.max - z.min, rz.max - rz.min)
+            if bt_span > usb_span * 2:
+                usb = False
+        except (AttributeError, OSError, ValueError, TypeError):
+            pass
+    if usb:
+        trigger = ABS_RZ if ABS_RZ in axes else (
+            ABS_GAS if ABS_GAS in axes else None)
+        return {'name': 'xpad', 'right_x': ABS_RX, 'right_y': ABS_RY,
+                'right_trigger': trigger}
+    if bt:
+        if not ({ABS_GAS, ABS_BRAKE} & axes):
+            # Reject an ambiguous two-trigger/no-right-stick device
+            # unless the axes have stick-sized resolution.
+            try:
+                left = device.absinfo(ABS_X)
+                z = device.absinfo(ABS_Z)
+                rz = device.absinfo(ABS_RZ)
+                if min(z.max - z.min, rz.max - rz.min) < (
+                        left.max - left.min) * 0.5:
+                    return None
+            except (AttributeError, OSError, ValueError, TypeError):
+                return None
+        return {'name': 'bluetooth-hid', 'right_x': ABS_Z,
+                'right_y': ABS_RZ,
+                'right_trigger': ABS_GAS if ABS_GAS in axes else None}
+    return None
+
+
+def usable(device, evdev):
+    return controller_layout(device, evdev) is not None
+
+
+def diagnostic(device, evdev):
+    """Detailed non-motion diagnostic shown by --list."""
+    caps = device.capabilities(absinfo=False)
+    axes = set(caps.get(evdev.ecodes.EV_ABS, []))
+    keys = set(caps.get(evdev.ecodes.EV_KEY, []))
+    layout = controller_layout(device, evdev)
+    missing = [name for code, name in
+               ((BTN_SELECT, 'BTN_SELECT'), (BTN_START, 'BTN_START'),
+                (BTN_SOUTH, 'BTN_SOUTH/A'), (BTN_EAST, 'BTN_EAST/B'),
+                (BTN_WEST, 'BTN_WEST/X'), (BTN_NORTH, 'BTN_NORTH/Y'))
+               if code not in keys]
+    names = [AXIS_NAMES.get(code, str(code)) for code in sorted(axes)]
+    return (f'layout={layout["name"] if layout else "unsupported"} '
+            f'axes={",".join(names) or "none"} '
+            f'missing_buttons={",".join(missing) or "none"}')
 
 
 def find_pad(evdev, selected=None):
@@ -159,15 +236,24 @@ def find_pad(evdev, selected=None):
 
 
 def initial_state(pad, evdev):
+    layout = controller_layout(pad, evdev)
+    if layout is None:
+        raise ValueError('unsupported Xbox Linux input mapping')
     ranges = {}
-    for code in REQUIRED_ABS | {ABS_RZ, ABS_Z}:
+    for code in {ABS_X, ABS_Y, layout['right_x'], layout['right_y'],
+                 layout['right_trigger']} - {None}:
         try:
             info = pad.absinfo(code)
             if info is not None:
                 ranges[code] = (info.min, info.max, info.value)
         except (OSError, ValueError):
             continue
-    return PadState(ranges, pad.active_keys())
+    if not {ABS_X, ABS_Y, layout['right_x'], layout['right_y']} <= ranges.keys():
+        raise ValueError('required Xbox stick axis information missing')
+    print(f'Xbox Linux input layout: {layout["name"]}', flush=True)
+    return PadState(ranges, pad.active_keys(),
+                    right_x=layout['right_x'], right_y=layout['right_y'],
+                    right_trigger=layout['right_trigger'])
 
 
 def serve_device(pad, evdev, api, running):
@@ -254,7 +340,8 @@ def main(argv=None):
             try:
                 pad = evdev.InputDevice(path)
                 print(f'{path}: {pad.name} vendor={pad.info.vendor:04x} '
-                      f'usable={usable(pad, evdev)}')
+                      f'usable={usable(pad, evdev)} '
+                      f'{diagnostic(pad, evdev)}')
                 pad.close()
             except OSError as exc:
                 print(f'{path}: {exc}')
