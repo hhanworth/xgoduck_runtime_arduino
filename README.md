@@ -167,7 +167,7 @@ uint8 percentage, uint8 flags, bit 0 = valid).
 The 240-byte `duck_state` ABI and the 100 Hz motion controller are unchanged.
 The host exposes `battery.valid`, `battery.voltage_v`, and `battery.percent`
 in `/api/status` and the **control Web UI** shows voltage, percentage and a level
-bar. The host treats packets older than 3 seconds as unknown; it never displays
+bar. The Calibration and Servo setup pages also show a compact battery readout. The host treats packets older than 3 seconds as unknown; it never displays
 unavailable telemetry as 0%.
 
 For a protocol-only check run `python3 -m unittest discover -s tests -v`.
