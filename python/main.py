@@ -4,10 +4,12 @@ from fastapi import HTTPException
 from arduino.app_utils import App, Bridge
 from arduino.app_bricks.web_ui import WebUI
 from controller import Controller
+from bluetooth_relay import BluetoothRelay
 
 # Bound GIL handoff latency between the 100 Hz receiver, policy and WebUI.
 sys.setswitchinterval(0.001)
 controller = Controller(Bridge)
+bluetooth = BluetoothRelay()
 ui = WebUI(port=9527, cors_origins='')
 Bridge.provide('duck_state', controller.receive)
 Bridge.provide('duck_boot_pd', controller.receive_boot_pd)
@@ -69,8 +71,51 @@ def servo_action(body: dict):
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc))
 
+def gamepad_claim(_body: dict = None):
+    try: return controller.gamepad_claim()
+    except ValueError as exc: raise HTTPException(409, str(exc))
+
+def gamepad_input(body: dict):
+    try:
+        return controller.gamepad_input(body['session'], body['twist'], body['head'],
+                                        body['mouth'], body.get('action'))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(409, str(exc))
+
+def gamepad_release(body: dict):
+    try: return controller.gamepad_release(body['session'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc))
+
+def bluetooth_scan(_body: dict = None):
+    try: return bluetooth.request('scan')
+    except ValueError as exc: raise HTTPException(409, str(exc))
+
+def bluetooth_action(body: dict):
+    try:
+        action = body['action']
+        if action in ('disconnect', 'forget'):
+            # Immediately revoke gamepad motion authority before unplugging it.
+            if controller.input_owner == 'gamepad':
+                controller.set_mode('off')
+        return bluetooth.request(action, body.get('address'))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(409, str(exc))
+
+def bluetooth_worker_report(body: dict):
+    try: return bluetooth.worker_report(body)
+    except ValueError as exc: raise HTTPException(400, str(exc))
+
 ui.expose_api('GET', '/api/status', controller.status)
+ui.expose_api('GET', '/api/bluetooth/status', bluetooth.status)
+ui.expose_api('POST', '/api/bluetooth/scan', bluetooth_scan)
+ui.expose_api('POST', '/api/bluetooth/action', bluetooth_action)
+ui.expose_api('GET', '/api/bluetooth/worker/next', bluetooth.worker_next)
+ui.expose_api('POST', '/api/bluetooth/worker/report', bluetooth_worker_report)
 ui.expose_api('POST', '/api/mode', mode)
+ui.expose_api('POST', '/api/gamepad/claim', gamepad_claim)
+ui.expose_api('POST', '/api/gamepad/input', gamepad_input)
+ui.expose_api('POST', '/api/gamepad/release', gamepad_release)
 ui.expose_api('POST', '/api/command', command)
 ui.expose_api('POST', '/api/filter', filtering)
 ui.expose_api('POST', '/api/pick', pick)

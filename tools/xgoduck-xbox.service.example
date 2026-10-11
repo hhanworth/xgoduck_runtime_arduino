@@ -1,0 +1,26 @@
+# Example only: copy to /etc/systemd/system/xgoduck-xbox.service after editing
+# the user and absolute checkout path. Use sudo systemctl daemon-reload &&
+# sudo systemctl enable --now xgoduck-xbox.service.
+[Unit]
+Description=XGO Duck native Xbox input on Uno Q Linux
+After=network-online.target bluetooth.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arduino
+SupplementaryGroups=input
+WorkingDirectory=/home/arduino/ArduinoApps/xgoduck_runtime_arduino
+ExecStart=/usr/bin/python3 /home/arduino/ArduinoApps/xgoduck_runtime_arduino/tools/xbox_host.py --api http://127.0.0.1:9527
+Restart=always
+RestartSec=2
+# Persists the paired Xbox MAC across reboot; BlueZ stores the bond itself.
+StateDirectory=xgoduck
+StateDirectoryMode=0700
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

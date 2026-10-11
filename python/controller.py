@@ -2,6 +2,7 @@
 import collections
 import json
 import math
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ PICK_MOUTH_CLOSE_PHI = 0.4
 ROULADE_S = 1.9
 ROULADE_ALPHA = 0.15
 CONTROL_PERIOD = 0.02
+GAMEPAD_TIMEOUT_S = 0.35  # Host daemon must refresh commands at 20 Hz.
 
 class Controller:
     def __init__(self, bridge):
@@ -63,6 +65,9 @@ class Controller:
         self.generation = 0
         self.twist, self.head, self.mouth = [0.0]*3, [0.0]*4, 0.0
         self.web_time = 0.0
+        self.input_owner = 'web'
+        self.gamepad_session = None
+        self.gamepad_seen = 0.0
         self.arm_pending = False
         self.seq = self.received = self.inferred = self.sent = self.bad_frames = self.gaps = 0
         self.last_error = ''
@@ -151,6 +156,8 @@ class Controller:
                 step = elapsed_us(fb.seq, old.seq)
                 if step == 0: return
                 if step > 0x80000000:
+                    if self.gamepad_session is not None:
+                        self._gamepad_disarm_locked('MCU restarted; gamepad disarmed')
                     self.mode = 'shadow'; self.generation += 1
                     self.arm_pending = False; self.filter.reset()
                     self.recovery.reset(); self.policy_needs_reset = True
@@ -178,10 +185,106 @@ class Controller:
         sample = self.feedback.sample_us if self.feedback else 0
         self.bridge.notify('duck_command', encode_command(self.seq, sample, DISARM, DEFAULT_DEG))
 
-    def set_mode(self, mode):
+    def _gamepad_disarm_locked(self, reason):
+        """Revoke the host-input lease and send DISARM immediately.
+
+        Must be called with self.lock held. MCU TTL remains a second safeguard.
+        """
+        self.gamepad_session = None
+        self.gamepad_seen = 0.0
+        self.input_owner = 'web'
+        self.mode = 'off'
+        self.generation += 1
+        self.twist, self.head, self.mouth = [0.0]*3, [0.0]*4, 0.0
+        self.recovery.reset()
+        self.policy_needs_reset = True
+        self._stop_pick_locked()
+        self._stop_roulade_locked()
+        self.last_error = reason
+        self._disarm_now()
+
+    def gamepad_claim(self):
+        """Reserve control for one physical gamepad after a deliberate arm chord."""
+        with self.lock:
+            if self.mode in EXCLUSIVE_MODES:
+                raise ValueError('exit calibration/servo setup first')
+            if self.gamepad_session is not None:
+                raise ValueError('gamepad already owns control')
+            # Never inherit an already armed web mode during takeover.
+            self._gamepad_disarm_locked('gamepad claimed; torque off until A or Start')
+            self.gamepad_session = secrets.token_urlsafe(32)
+            self.input_owner = 'gamepad'
+            self.gamepad_seen = time.monotonic()
+            self.web_time = self.gamepad_seen
+            return {'session': self.gamepad_session, 'mode': self.mode}
+
+    def _check_gamepad_locked(self, session):
+        if (not isinstance(session, str) or self.gamepad_session is None or
+                not secrets.compare_digest(session, self.gamepad_session)):
+            raise ValueError('invalid or expired gamepad session')
+        if time.monotonic() - self.gamepad_seen > GAMEPAD_TIMEOUT_S:
+            self._gamepad_disarm_locked('gamepad heartbeat expired; torque off')
+            raise ValueError('gamepad heartbeat expired')
+
+    def gamepad_input(self, session, twist, head, mouth, action=None):
+        """Atomic ownership check + normal controller pipeline, never raw servo IO."""
+        if action not in (None, 'off', 'hold', 'policy', 'pick', 'roulade'):
+            raise ValueError('unknown gamepad action')
+        # Validate *before* any mode transition to avoid arming on bad input.
+        # Emergency off deliberately bypasses input validation.
+        if action != 'off':
+            try:
+                twist = [float(v) for v in twist]
+                head = [float(v) for v in head]
+                mouth = float(mouth)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError('invalid gamepad command values')
+            if (len(twist) != 3 or len(head) != 4 or
+                    any(not math.isfinite(v) or abs(v) > limit
+                        for v, limit in zip(twist, (.4, .3, 1.0))) or
+                    any(not math.isfinite(v) or abs(v) > 1.0 for v in head) or
+                    not math.isfinite(mouth) or not 0 <= mouth <= MOUTH_MAX_DEG):
+                raise ValueError('invalid gamepad command bounds')
+        with self.lock:
+            self._check_gamepad_locked(session)
+            if action == 'off':
+                self._gamepad_disarm_locked('gamepad emergency stop')
+                return {'ok': True, 'mode': 'off', 'connected': False}
+            if action in ('hold', 'policy'):
+                self.set_mode(action, source='gamepad')
+            elif action == 'pick':
+                self.start_pick(source='gamepad')
+            elif action == 'roulade':
+                self.start_roulade(source='gamepad')
+            self.command(twist=twist, head=head, mouth=mouth, source='gamepad')
+            self.gamepad_seen = time.monotonic()
+            return {'ok': True, 'mode': self.mode, 'connected': True}
+
+    def gamepad_release(self, session):
+        with self.lock:
+            if (not isinstance(session, str) or self.gamepad_session is None or
+                    not secrets.compare_digest(session, self.gamepad_session)):
+                return {'ok': False, 'connected': False}
+            self._gamepad_disarm_locked('gamepad disconnected/released; torque off')
+            return {'ok': True, 'connected': False}
+
+    def _check_input_owner_locked(self, source):
+        if source not in ('web', 'gamepad'):
+            raise ValueError('invalid input source')
+        if source == 'gamepad' and self.input_owner != 'gamepad':
+            raise ValueError('no active gamepad lease')
+        if source == 'web' and self.input_owner == 'gamepad':
+            raise ValueError('gamepad owns control; torque off to override')
+
+    def set_mode(self, mode, source='web'):
         if mode not in ('shadow', 'off', 'hold', 'policy', 'calibrate', 'servo_debug'):
             raise ValueError('unknown mode')
         with self.lock:
+            if source == 'web' and self.input_owner == 'gamepad' and mode == 'off':
+                # Emergency off is always available from the web, too.
+                self._gamepad_disarm_locked('web emergency stop; gamepad lease revoked')
+                return {'mode': 'off'}
+            self._check_input_owner_locked(source)
             if mode == self.mode:
                 self.web_time = time.monotonic()
                 return {'mode': self.mode}
@@ -255,8 +358,9 @@ class Controller:
     def _roulade_on(self, now):
         return now < self.roulade_until
 
-    def start_pick(self):
+    def start_pick(self, source='web'):
         with self.lock:
+            self._check_input_owner_locked(source)
             if self.mode not in ('shadow', 'policy'):
                 raise ValueError('pick requires shadow/policy mode')
             if self.recovery.phase != 'walk' or self._roulade_on(time.monotonic()):
@@ -272,8 +376,9 @@ class Controller:
             self.pick_policy.warm(2)
         return {'ok': True, 'phi': 0.0, 'model': self.pick_policy.file}
 
-    def start_roulade(self):
+    def start_roulade(self, source='web'):
         with self.lock:
+            self._check_input_owner_locked(source)
             if self.mode not in ('shadow', 'policy'):
                 raise ValueError('roulade requires shadow/policy mode')
             if self.recovery.phase != 'walk' or self.pick_active:
@@ -290,7 +395,7 @@ class Controller:
                 self.roulade_policy.warm(2)
         return {'ok': True, 'model': self.roulade_policy.file, 'seconds': ROULADE_S}
 
-    def command(self, twist=None, head=None, mouth=None):
+    def command(self, twist=None, head=None, mouth=None, source='web'):
         def values(seq, limits):
             if len(seq)!=len(limits): raise ValueError('wrong command dimension')
             seq = [float(v) for v in seq]
@@ -305,6 +410,7 @@ class Controller:
             if not math.isfinite(m) or not 0 <= m <= MOUTH_MAX_DEG:
                 raise ValueError('command exceeds bounds')
         with self.lock:
+            self._check_input_owner_locked(source)
             if self.mode in EXCLUSIVE_MODES:
                 raise ValueError('motion commands disabled in calibrate/servo_debug')
             if t is not None and not self.pick_active: self.twist = t
@@ -387,6 +493,9 @@ class Controller:
 
     def step(self):
         with self.lock:
+            if (self.gamepad_session is not None and
+                    time.monotonic() - self.gamepad_seen > GAMEPAD_TIMEOUT_S):
+                self._gamepad_disarm_locked('gamepad heartbeat lost; torque off')
             fb, filt, generation, mode = self.feedback, self.filtered, self.generation, self.mode
             age = time.monotonic()-self.rx_time
             if mode in ('hold','policy'):
@@ -396,11 +505,17 @@ class Controller:
                 elif time.monotonic()-self.web_time > 1.0:
                     lost = 'web heartbeat lost; disarmed'
                 if lost:
-                    self.mode = mode = 'shadow'; self.generation += 1
-                    self.arm_pending = False; self.last_error = lost
+                    if self.gamepad_session is not None:
+                        # An IMU/Bridge failure invalidates the lease. Do not
+                        # auto-resume when sensor feedback recovers.
+                        self._gamepad_disarm_locked(lost + '; gamepad lease revoked')
+                        mode = 'off'
+                    else:
+                        self.mode = mode = 'shadow'; self.generation += 1
+                        self.arm_pending = False; self.last_error = lost
+                        self.recovery.reset(); self.policy_needs_reset = True
+                        self._stop_pick_locked(); self._stop_roulade_locked()
                     generation = self.generation
-                    self.recovery.reset(); self.policy_needs_reset = True
-                    self._stop_pick_locked(); self._stop_roulade_locked()
             elif mode in EXCLUSIVE_MODES:
                 if time.monotonic()-self.web_time > 2.0:
                     previous = mode
@@ -534,6 +649,8 @@ class Controller:
                 self.step()
             except Exception as exc:
                 with self.lock:
+                    if self.gamepad_session is not None:
+                        self._gamepad_disarm_locked('policy fault; gamepad disarmed: ' + str(exc))
                     self.last_error = str(exc); self.mode = 'off'; self.generation += 1; self.arm_pending = False
                     self._stop_pick_locked(); self._stop_roulade_locked()
             deadline += CONTROL_PERIOD
@@ -553,6 +670,9 @@ class Controller:
     def stop(self):
         self.stop_event.set()
         with self.lock:
+            self.gamepad_session = None
+            self.gamepad_seen = 0.0
+            self.input_owner = 'web'
             previous = self.mode
             self.mode = 'off'; self.generation += 1; self.arm_pending = False
             if previous == 'calibrate':
@@ -577,6 +697,8 @@ class Controller:
         with self.lock:
             fb = self.feedback
             result = dict(mode=self.mode, model=self.model_message, bridge_baud=2000000,
+                input_owner=self.input_owner, gamepad_active=self.gamepad_session is not None,
+                gamepad_age_ms=((now-self.gamepad_seen)*1000 if self.gamepad_session else None),
                 feedback_hz=hz(self.rx_times), inference_hz=hz(self.infer_times),
                 received=self.received, inferred=self.inferred, sent=self.sent,
                 bad_frames=self.bad_frames, sequence_gaps=self.gaps, loop_missed=self.loop_missed,
