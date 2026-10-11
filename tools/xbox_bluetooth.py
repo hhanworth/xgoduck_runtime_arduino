@@ -226,7 +226,9 @@ class BluetoothWorker:
                         self.report(**self.status())
                         self.last_status = now
             except (error.URLError, TimeoutError, ValueError, RuntimeError) as exc:
-                # App may not be started yet; do not block evdev input service.
+                # The Duck App may still be booting. Reconnect the previously
+                # paired controller regardless of its HTTP availability.
+                self.autoconnect_step()
                 print(f'Bluetooth worker retrying: {exc}', flush=True)
             # Systemd manages process restarts; worker polls independently of UI.
             time.sleep(1.0)
