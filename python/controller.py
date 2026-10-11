@@ -230,6 +230,21 @@ class Controller:
         """Atomic ownership check + normal controller pipeline, never raw servo IO."""
         if action not in (None, 'off', 'hold', 'policy', 'pick', 'roulade'):
             raise ValueError('unknown gamepad action')
+        # Validate *before* any mode transition to avoid arming on bad input.
+        # Emergency off deliberately bypasses input validation.
+        if action != 'off':
+            try:
+                twist = [float(v) for v in twist]
+                head = [float(v) for v in head]
+                mouth = float(mouth)
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError('invalid gamepad command values')
+            if (len(twist) != 3 or len(head) != 4 or
+                    any(not math.isfinite(v) or abs(v) > limit
+                        for v, limit in zip(twist, (.4, .3, 1.0))) or
+                    any(not math.isfinite(v) or abs(v) > 1.0 for v in head) or
+                    not math.isfinite(mouth) or not 0 <= mouth <= MOUTH_MAX_DEG):
+                raise ValueError('invalid gamepad command bounds')
         with self.lock:
             self._check_gamepad_locked(session)
             if action == 'off':
