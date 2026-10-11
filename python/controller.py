@@ -490,11 +490,17 @@ class Controller:
                 elif time.monotonic()-self.web_time > 1.0:
                     lost = 'web heartbeat lost; disarmed'
                 if lost:
-                    self.mode = mode = 'shadow'; self.generation += 1
-                    self.arm_pending = False; self.last_error = lost
+                    if self.gamepad_session is not None:
+                        # An IMU/Bridge failure invalidates the lease. Do not
+                        # auto-resume when sensor feedback recovers.
+                        self._gamepad_disarm_locked(lost + '; gamepad lease revoked')
+                        mode = 'off'
+                    else:
+                        self.mode = mode = 'shadow'; self.generation += 1
+                        self.arm_pending = False; self.last_error = lost
+                        self.recovery.reset(); self.policy_needs_reset = True
+                        self._stop_pick_locked(); self._stop_roulade_locked()
                     generation = self.generation
-                    self.recovery.reset(); self.policy_needs_reset = True
-                    self._stop_pick_locked(); self._stop_roulade_locked()
             elif mode in EXCLUSIVE_MODES:
                 if time.monotonic()-self.web_time > 2.0:
                     previous = mode
