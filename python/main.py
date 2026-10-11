@@ -69,8 +69,27 @@ def servo_action(body: dict):
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(400, str(exc))
 
+def gamepad_claim(_body: dict = None):
+    try: return controller.gamepad_claim()
+    except ValueError as exc: raise HTTPException(409, str(exc))
+
+def gamepad_input(body: dict):
+    try:
+        return controller.gamepad_input(body['session'], body['twist'], body['head'],
+                                        body['mouth'], body.get('action'))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(409, str(exc))
+
+def gamepad_release(body: dict):
+    try: return controller.gamepad_release(body['session'])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(400, str(exc))
+
 ui.expose_api('GET', '/api/status', controller.status)
 ui.expose_api('POST', '/api/mode', mode)
+ui.expose_api('POST', '/api/gamepad/claim', gamepad_claim)
+ui.expose_api('POST', '/api/gamepad/input', gamepad_input)
+ui.expose_api('POST', '/api/gamepad/release', gamepad_release)
 ui.expose_api('POST', '/api/command', command)
 ui.expose_api('POST', '/api/filter', filtering)
 ui.expose_api('POST', '/api/pick', pick)
