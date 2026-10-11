@@ -98,6 +98,29 @@ class GamepadControllerTests(unittest.TestCase):
             c.gamepad_input(session, [10, 0, 0], [0]*4, 0)
         self.assertEqual(c.twist, [.2, -.1, .4])
 
+    def test_invalid_motion_cannot_arm_on_action(self):
+        c = build_controller()
+        c.feedback = SimpleNamespace(imu_ok=True, mask=0, enabled=False, sample_us=55)
+        c.rx_time = time.monotonic()
+        session = c.gamepad_claim()['session']
+        with self.assertRaises(ValueError):
+            c.gamepad_input(session, [5, 0, 0], [0]*4, 0, action='policy')
+        self.assertEqual(c.mode, 'off')
+        self.assertFalse(c.arm_pending)
+
+    def test_sensor_loss_revokes_and_requires_new_chord(self):
+        c = build_controller()
+        c.feedback = SimpleNamespace(imu_ok=False, mask=0, enabled=False, sample_us=55)
+        c.rx_time = time.monotonic()
+        session = c.gamepad_claim()['session']
+        # Simulate a previously armed walk when the IMU disappears.
+        c.mode = 'policy'
+        c.step()
+        self.assertEqual(c.mode, 'off')
+        self.assertIsNone(c.gamepad_session)
+        with self.assertRaises(ValueError):
+            c.gamepad_input(session, [0]*3, [0]*4, 0)
+
     def test_session_mismatch_and_release(self):
         c = build_controller()
         session = c.gamepad_claim()['session']
