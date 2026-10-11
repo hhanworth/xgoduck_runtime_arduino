@@ -5,6 +5,7 @@
 #include "duck_config.h"
 #include "protocol.h"
 #include "scs_bus.h"
+#include "battery.h"
 #include "qmi8658.h"
 #include "uart_fifo.h"
 
@@ -16,7 +17,8 @@ static struct k_mutex commandMu, stateMu, hostMu;
 static struct k_sem reportReady;
 K_THREAD_STACK_DEFINE(controlStack, 4096);
 K_THREAD_STACK_DEFINE(reportStack, 4096);
-static struct k_thread controlThread, reportThread;
+K_THREAD_STACK_DEFINE(batteryStack, 2048);
+static struct k_thread controlThread, reportThread, batteryThread;
 static StatePacket snapshot = {};
 static CommandPacket latest = {};
 static bool pending = false;
@@ -234,6 +236,8 @@ static void controlTask(void*, void*, void*) {
   uint32_t deadline = micros(), previous = deadline, seq = 0, lastCommandUs = 0;
   uint32_t acceptedSeq = 0, ttl = COMMAND_TTL_US, overruns = 0, lastImuUs = 0;
   uint32_t lastHealthyUs = 0;
+  uint32_t lastBatteryPollUs = micros() - 1000000u;
+  uint8_t batteryProbeIndex = 0;
   bool enabled = false, timedOut = false, haveCommand = false;
   for (;;) {
     const uint32_t start = micros(), period = start - previous;
@@ -306,6 +310,29 @@ static void controlTask(void*, void*, void*) {
       parseServoRx(); k_sleep(K_USEC(100));
     }
     parseServoRx();
+    // A single, low-rate voltage read on the SAME bus-owner thread.
+    // Wait for the normal sync-read replies before requesting 0x3E to avoid collisions.
+    if ((uint32_t)(micros() - lastBatteryPollUs) >= 1000000u) {
+      lastBatteryPollUs = micros();
+      uint8_t chosen = batteryProbeIndex;
+      for (uint8_t step = 0; step < NUM_MOTORS; ++step) {
+        const uint8_t idx = (batteryProbeIndex + step) % NUM_MOTORS;
+        if (servoRxMask & (1u << idx)) { chosen = idx; break; }
+      }
+      batteryProbeIndex = (chosen + 1) % NUM_MOTORS;
+      readSingleVoltage(motors[chosen].id);
+      Serial1.flush();
+      const uint32_t voltageStart = micros();
+      while ((uint32_t)(micros() - voltageStart) < 1500u) {
+        parseServoRx();
+        if (servoVoltageReady) break;
+        k_sleep(K_USEC(100));
+      }
+      parseServoRx();
+      if (servoVoltageReady) batteryAcceptVoltage(servoVoltageRaw, micros());
+      servoVoltageTarget = 0; // discard any late reply
+    }
+    batteryExpire(micros());
     if (imu.ok) lastHealthyUs = micros();
     StatePacket s = {};
     memcpy(s.magic, "DQS1", 4); s.version = 1;
@@ -369,6 +396,11 @@ static void reportTask(void*, void*, void*) {
       Bridge.notify("duck_servo_reply", rb);
     }
     if ((++reports % 100) == 0) {
+      const BatteryPacket battery = batteryReadSnapshot();
+      MsgPack::bin_t<uint8_t> vb;
+      vb.resize(sizeof(battery));
+      memcpy(vb.data(), &battery, sizeof(battery));
+      Bridge.notify("duck_battery", vb);
       MsgPack::bin_t<uint8_t> pd;
       pd.resize(32);
       pd[0]=servoPdMask & 255; pd[1]=servoPdMask >> 8;
@@ -384,6 +416,7 @@ void setup() {
   k_mutex_init(&stateMu);
   k_mutex_init(&hostMu);
   k_sem_init(&reportReady, 0, 1);
+  batteryInit();
   for (unsigned i = 0; i < NUM_MOTORS; ++i) {
     motors[i] = {}; motors[i].id = MOTOR_IDS[i]; motors[i].zeroPos = ZERO_POS[i];
     motors[i].fbPos = ZERO_POS[i];
@@ -403,6 +436,9 @@ void setup() {
   k_thread_create(&reportThread, reportStack, K_THREAD_STACK_SIZEOF(reportStack),
                   reportTask, nullptr, nullptr, nullptr, 6, 0, K_NO_WAIT);
   k_thread_name_set(&reportThread, "duck_report100");
+  k_thread_create(&batteryThread, batteryStack, K_THREAD_STACK_SIZEOF(batteryStack),
+                  batteryDisplayTask, nullptr, nullptr, nullptr, 8, 0, K_NO_WAIT);
+  k_thread_name_set(&batteryThread, "duck_battery_led");
   // GCC 14 otherwise emits a tail B.W to a flash syscall from RAM, outside
   // Thumb JUMP24 range; the Uno Q extension loader rejects it with ENOEXEC.
   asm volatile("nop" ::: "memory");
