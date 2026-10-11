@@ -5,9 +5,11 @@ from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from xbox_host import (PadState, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED,
-                       ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_RZ,
+                       ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ,
+                       ABS_GAS, ABS_BRAKE,
                        BTN_SELECT, BTN_START, BTN_SOUTH, BTN_EAST, BTN_WEST,
-                       BTN_NORTH, BTN_TL, ARM_CHORD_S, usable)
+                       BTN_NORTH, BTN_TL, ARM_CHORD_S, usable,
+                       diagnostic, controller_layout, initial_state)
 
 RANGES = {code: (0, 255, 127.5) for code in (ABS_X, ABS_Y, ABS_RX, ABS_RY)}
 RANGES[ABS_RZ] = (0, 1023, 0)
@@ -27,6 +29,75 @@ class XboxMappingTests(unittest.TestCase):
                 }
         ecodes = SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY)
         self.assertTrue(usable(InputDevice(), SimpleNamespace(ecodes=ecodes)))
+
+    def test_bluetooth_hid_layout_right_stick_and_gas_trigger(self):
+        """Xbox Bluetooth HID exposes Z/RZ as sticks, BRAKE/GAS as triggers."""
+        class InputDevice:
+            def capabilities(self, absinfo=True):
+                axes = [ABS_X, ABS_Y, ABS_Z, ABS_RZ, ABS_BRAKE, ABS_GAS]
+                return {EV_ABS: axes, EV_KEY: [
+                    BTN_SELECT, BTN_START, BTN_SOUTH, BTN_EAST,
+                    BTN_WEST, BTN_NORTH]}
+            def absinfo(self, code):
+                lo, hi, value = ((0, 1023, 0) if code in (ABS_GAS, ABS_BRAKE)
+                                 else (0, 65535, 32767))
+                return SimpleNamespace(min=lo, max=hi, value=value)
+            def active_keys(self):
+                return []
+        device = InputDevice()
+        fake = SimpleNamespace(ecodes=SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY))
+        layout = controller_layout(device, fake)
+        self.assertEqual(layout['name'], 'bluetooth-hid')
+        self.assertEqual(layout['right_x'], ABS_Z)
+        self.assertEqual(layout['right_y'], ABS_RZ)
+        self.assertEqual(layout['right_trigger'], ABS_GAS)
+        self.assertTrue(usable(device, fake))
+        self.assertIn('layout=bluetooth-hid', diagnostic(device, fake))
+        pad = initial_state(device, fake)
+        self.assertTrue(pad.neutral())
+        pad.feed(EV_ABS, ABS_Z, 0)
+        self.assertAlmostEqual(pad.command()['twist'][2], 1.0)
+        pad.feed(EV_ABS, ABS_RZ, 0)
+        self.assertFalse(pad.neutral())
+        pad.feed(EV_ABS, ABS_GAS, 1023)
+        self.assertEqual(pad.command()['mouth'], 30)
+        pad.feed(EV_ABS, ABS_GAS, 0)
+        self.assertEqual(pad.command()['mouth'], 0)
+
+    def test_missing_back_button_must_not_claim_controller(self):
+        class MissingSafetyKey:
+            def capabilities(self, absinfo=True):
+                return {EV_ABS: [ABS_X, ABS_Y, ABS_Z, ABS_RZ,
+                                 ABS_GAS, ABS_BRAKE],
+                        EV_KEY: [BTN_START, BTN_SOUTH, BTN_EAST,
+                                 BTN_WEST, BTN_NORTH]}
+        fake = SimpleNamespace(ecodes=SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY))
+        self.assertFalse(usable(MissingSafetyKey(), fake))
+        self.assertIn('BTN_SELECT', diagnostic(MissingSafetyKey(), fake))
+
+    def test_ambiguous_trigger_only_axes_are_rejected(self):
+        class BadPad:
+            def capabilities(self, absinfo=True):
+                return {EV_ABS: [ABS_X, ABS_Y, ABS_Z, ABS_RZ],
+                        EV_KEY: [BTN_SELECT, BTN_START, BTN_SOUTH,
+                                 BTN_EAST, BTN_WEST, BTN_NORTH]}
+            def absinfo(self, code):
+                return SimpleNamespace(min=0, max=65535 if code == ABS_X else 1023)
+        fake = SimpleNamespace(ecodes=SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY))
+        self.assertFalse(usable(BadPad(), fake))
+
+    def test_both_axis_groups_choose_full_range_right_stick(self):
+        class DualPad:
+            def capabilities(self, absinfo=True):
+                return {EV_ABS: [ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z,
+                                 ABS_RZ, ABS_GAS],
+                        EV_KEY: [BTN_SELECT, BTN_START, BTN_SOUTH,
+                                 BTN_EAST, BTN_WEST, BTN_NORTH]}
+            def absinfo(self, code):
+                span = 1023 if code in (ABS_RX, ABS_RY, ABS_GAS) else 65535
+                return SimpleNamespace(min=0, max=span)
+        fake = SimpleNamespace(ecodes=SimpleNamespace(EV_ABS=EV_ABS, EV_KEY=EV_KEY))
+        self.assertEqual(controller_layout(DualPad(), fake)['name'], 'bluetooth-hid')
 
     def test_neutral_deadzone_and_scaled_directions(self):
         pad = PadState(RANGES)
