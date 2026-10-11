@@ -11,18 +11,20 @@ $('roulade').onclick=async()=>{try{const r=await post('roulade',{});$('message')
 $('stop').onclick=()=>{zero();setMode('off')};
 const keys=new Set(), sticks={left:{x:0,y:0},right:{x:0,y:0}}, resetSticks=[];
 let motion=[0,0,0];
+let gamepadInput=null;
 const deadzone=v=>Math.abs(v)<.1?0:v;
 function updateMotion(){
   const key=(a,b)=>keys.has(a)-keys.has(b);
   motion=[keys.has('w')||keys.has('s')?key('w','s')*.2:deadzone(sticks.left.y)*.4,
     keys.has('a')||keys.has('d')?key('a','d')*.15:deadzone(-sticks.left.x)*.3,
     keys.has('q')||keys.has('e')?key('q','e')*.5:deadzone(-sticks.right.x)];
+  if(gamepadInput) motion=[...gamepadInput.twist];
   ['vx','vy','wz'].forEach((id,i)=>$(id+'Value').textContent=motion[i].toFixed(2));
 }
 async function sendCommand(){
   if(commandBusy){commandPending=true;return;}
   commandBusy=true;commandPending=false;
-  try{await post('command',{twist:[...motion],head:[0,1,2,3].map(i=>+$('head'+i).value),mouth:+$('mouth').value});}
+  try{await post('command',{twist:[...motion],head:gamepadInput?[...gamepadInput.head]:[0,1,2,3].map(i=>+$('head'+i).value),mouth:gamepadInput?gamepadInput.mouth:+$('mouth').value});}
   catch(e){showError(e);}
   finally{commandBusy=false;if(commandPending)sendCommand();}
 }
@@ -49,14 +51,14 @@ function joystick(id,side){
   zone.onpointerup=zone.onpointercancel=zone.onlostpointercapture=release;
 }
 joystick('joy-left','left');joystick('joy-right','right');
-function zero(){keys.clear();resetSticks.forEach(reset=>reset());updateMotion();sendCommand();}
+function zero(){keys.clear();resetSticks.forEach(reset=>reset());gamepadInput=null;updateMotion();sendCommand();}
 $('zero').onclick=zero;
 ['leg-alpha','head-alpha'].forEach(id=>$(id).onchange=()=>post('filter',{leg:+$('leg-alpha').value,head:+$('head-alpha').value}).catch(showError));
 function keyCommand(){updateMotion();sendCommand();}
 window.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();$('stop').click();return;}const k=e.key.toLowerCase();if('wasdqe'.includes(k)&&k.length===1){keys.add(k);keyCommand();}});
 window.addEventListener('keyup',e=>{const k=e.key.toLowerCase();if(keys.delete(k))keyCommand();});
-window.addEventListener('blur',()=>{keys.clear();zero();});
-document.addEventListener('visibilitychange',()=>{if(document.hidden){keys.clear();zero();post('mode',{mode:'off'}).catch(()=>{});}});
+window.addEventListener('blur',()=>{disableGamepad(true);keys.clear();zero();post('mode',{mode:'off'}).catch(()=>{});});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){disableGamepad(true);keys.clear();zero();post('mode',{mode:'off'}).catch(()=>{});}});
 window.addEventListener('pagehide',()=>navigator.sendBeacon('/api/mode',new Blob([JSON.stringify({mode:'off'})],{type:'application/json'})));
 setInterval(()=>{if(!document.hidden&&!commandBusy)sendCommand();},50);
 setInterval(async()=>{if(statusBusy||document.hidden)return;statusBusy=true;try{const r=await fetch('/api/status');if(!r.ok)throw new Error('status read failed');const s=await r.json();const modeLabel={shadow:'inference only',off:'torque off',hold:'default pose',policy:'walk',calibrate:'calibrate',servo_debug:'servo setup'};$('rx').textContent=s.feedback_hz.toFixed(1)+' Hz';$('rl').textContent=s.inference_hz.toFixed(1)+' Hz';$('servos').textContent=(s.servo_ids?.length||0)+'/15';$('imu').textContent=s.imu_ok?'online':'offline';$('mode').textContent=(modeLabel[s.mode]||s.mode)+(s.enabled?' · enabled':' · torque off');$('message').textContent=s.last_error||`Bridge ${(s.bridge_baud/1e6).toFixed(0)} Mbps · state age ${(s.feedback_age_ms||0).toFixed(1)} ms`;
@@ -73,3 +75,68 @@ for(const [id,values]of [['acc-values',s.acc],['gyro-values',s.gyro],['gravity-v
 $('command-health').textContent=`sent ${s.sent} · MCU echo ${s.mcu_command_seq??'—'} · command age ${s.mcu_command_age_us<1e9?(s.mcu_command_age_us/1000).toFixed(1)+' ms':'—'} · gaps ${s.sequence_gaps} · rejected ${s.mcu_invalid_commands??0}`;
 if(s.angles)$('joints').innerHTML=s.motors.map((id,i)=>`<tr class="${s.servo_ids.includes(id)?'':'missing'}"><td>${id}</td><td>${s.angles[i].toFixed(1)}</td><td>${s.targets[i].toFixed(1)}</td></tr>`).join('');
 }catch(e){showError(e);}finally{statusBusy=false;}},250);
+
+/* Xbox controller is deliberately opt-in: a newly connected gamepad never arms motors. */
+let gamepadIndex=null, gamepadButtons={}, gamepadLastPoll=0;
+let gamepadDisarming=false;
+const padStatus=$('gamepad-status');
+const usePad=$('gamepad-enable');
+const releasePad=$('gamepad-disable');
+function connectedPad(){
+  if(!navigator.getGamepads)return null;
+  const pads=navigator.getGamepads();
+  if(gamepadIndex!==null)return pads[gamepadIndex]||null;
+  return Array.from(pads).find(p=>p?.connected&&p.mapping==='standard')||null;
+}
+function disableGamepad(disarm=false){
+  const wasActive=gamepadIndex!==null;
+  gamepadIndex=null;gamepadButtons={};gamepadInput=null;updateMotion();
+  usePad.disabled=false;releasePad.disabled=true;
+  padStatus.textContent=wasActive?'Control released · torque off':'Connect a standard Xbox gamepad, then enable';
+  if(wasActive&&disarm&&!gamepadDisarming){
+    gamepadDisarming=true;
+    post('mode',{mode:'off'}).catch(showError).finally(()=>{gamepadDisarming=false;});
+  }
+}
+usePad.onclick=()=>{
+  const pad=connectedPad();
+  if(!pad||!window.XboxGamepad?.decode(pad)){
+    padStatus.textContent='No standard-mapped gamepad detected. Press a button and retry.';
+    return;
+  }
+  const data=window.XboxGamepad.decode(pad);
+  if(!data.neutral){padStatus.textContent='Release both sticks to neutral before enabling.';return;}
+  gamepadIndex=pad.index;
+  gamepadButtons={};
+  // Latch existing buttons to prevent a held button from invoking an action.
+  for(const key of ['stop','hold','walk','pick','roulade'])gamepadButtons[key]=data[key];
+  gamepadLastPoll=performance.now();
+  usePad.disabled=true;releasePad.disabled=false;
+  padStatus.textContent=pad.id+' · enabled (B: torque off)';
+};
+releasePad.onclick=()=>disableGamepad(true);
+window.addEventListener('gamepaddisconnected',e=>{
+  if(e.gamepad.index===gamepadIndex)disableGamepad(true);
+});
+function pollGamepad(){
+  if(gamepadIndex===null)return;
+  if(document.hidden){disableGamepad(true);return;}
+  const now=performance.now();
+  const pad=connectedPad();
+  const data=window.XboxGamepad?.decode(pad);
+  if(!data||now-gamepadLastPoll>500){disableGamepad(true);return;}
+  gamepadLastPoll=now;
+  gamepadInput=data;
+  updateMotion();
+  // Stop has precedence. The button is edge-triggered to avoid repeated HTTP requests.
+  if(data.stop&&!gamepadButtons.stop){disableGamepad(true);return;}
+  for(const [name,action] of [
+    ['hold',()=>setMode('hold')],
+    ['walk',()=>setMode('policy')],
+    ['pick',()=>$('pick').click()],
+    ['roulade',()=>$('roulade').click()]]) {
+    if(data[name]&&!gamepadButtons[name])action();
+  }
+  for(const key of ['stop','hold','walk','pick','roulade'])gamepadButtons[key]=data[key];
+}
+setInterval(pollGamepad,20);
