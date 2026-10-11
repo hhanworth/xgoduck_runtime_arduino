@@ -257,6 +257,14 @@ def main(argv=None):
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     api = API(args.api)
+    # Bluetooth administration is intentionally separate from the evdev event
+    # loop: 12-second scans and pairing never block 20 Hz motion commands.
+    from xbox_bluetooth import BluetoothWorker
+    import threading
+    bt_worker = BluetoothWorker(args.api)
+    bt_thread = threading.Thread(target=bt_worker.run, args=(lambda: alive[0],),
+                                 name='xgoduck-bluetooth', daemon=True)
+    bt_thread.start()
     missing_logged = False
     while alive[0]:
         pad = find_pad(evdev, args.device)
