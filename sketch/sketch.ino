@@ -9,6 +9,13 @@
 #include "qmi8658.h"
 #include "uart_fifo.h"
 
+// In some Arduino App CLI / Zephyr loadable-sketch builds the RouterBridge
+// headers are resolved but its src/singletons.cpp is omitted from the link.
+// bridge.h only declares "extern BridgeClass Bridge", so the MCU fails to link.
+// Provide a weak fallback so a normally linked library's strong singleton wins.
+// The documented UNO Q Router serial is the same one used by the sketch.
+BridgeClass Bridge __attribute__((weak)) (ARDUINO_ROUTER_SERIAL);
+
 Motor motors[NUM_MOTORS];
 struct k_mutex motorsMu;
 // App sketches are Zephyr loadable extensions: initialize kernel objects at runtime.
