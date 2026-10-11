@@ -151,6 +151,7 @@ class RelayTests(unittest.TestCase):
             self.relay.request('scan')
         with self.assertRaises(ValueError):
             self.relay.request('connect', 'not a mac')
+        self.assertEqual(self.relay.worker_next()['job']['action'], 'scan')
         self.assertIsNone(self.relay.worker_next()['job'])
         # Worker already polled this job; web status stays busy.
         self.assertEqual(self.relay.status()['action'], 'scan')
