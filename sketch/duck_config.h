@@ -18,6 +18,7 @@ static const uint8_t ADDR_GOAL_POS = 0x2A;
 static const uint8_t ADDR_PRESENT = 0x38;
 static const uint8_t PRESENT_LEN = 6;
 static const uint8_t ADDR_TORQUE = 40;
+static const uint8_t ADDR_PRESENT_VOLTAGE = 0x3E; // STS/SCS, 0.1 V / count
 static const uint8_t ADDR_TEMP_KP = 50;
 static const uint8_t ADDR_TEMP_KD = 51;
 static const uint8_t ADDR_PERM_KP_KD = 0x15;
