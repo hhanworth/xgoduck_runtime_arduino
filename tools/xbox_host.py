@@ -133,7 +133,9 @@ class API:
 
 
 def usable(device, evdev):
-    caps = device.capabilities()
+    # python-evdev's default absinfo=True returns (code, AbsInfo) pairs
+    # for EV_ABS, which cannot be compared to plain integer axis codes.
+    caps = device.capabilities(absinfo=False)
     axes = set(caps.get(evdev.ecodes.EV_ABS, []))
     keys = set(caps.get(evdev.ecodes.EV_KEY, []))
     return REQUIRED_ABS <= axes and REQUIRED_KEYS <= keys
